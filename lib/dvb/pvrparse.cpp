@@ -916,64 +916,114 @@ int eMPEGStreamParserTS::processPacket(const unsigned char *pkt, off_t offset)
 		pkt += pkt[8] + 9;
 	}
 
-	while (pkt < (end-4))
+	for (; pkt < (end-4); ++pkt)
 	{
 		int pkt_offset = pkt - begin;
 		if (!(pkt[0] || pkt[1] || (pkt[2] != 1)))
 		{
-//			 ("SC %02x %02x %02x %02x, %02x", pkt[0], pkt[1], pkt[2], pkt[3], pkt[4]);
+//			eDebug("[eMPEGStreamParserTS] SC %02x %02x %02x %02x, %02x", pkt[0], pkt[1], pkt[2], pkt[3], pkt[4]);
 			unsigned int sc = pkt[3];
-			
-			if (m_streamtype == 0) /* mpeg2 */
+
+			if (m_streamtype < 0) /* unknown */
 			{
-				if ((sc == 0x00) || (sc == 0xb3) || (sc == 0xb8)) /* picture, sequence, group start code */
+				if ((sc == 0x00) || (sc == 0xb3) || (sc == 0xb8))
 				{
-					if ((sc == 0xb3) && m_enable_accesspoints) /* sequence header */
+					eDebug("[eMPEGStreamParserTS] - detected MPEG2 stream");
+					m_streamtype = 0;
+				}
+				else if (sc == 0x09)
+				{
+					eDebug("[eMPEGStreamParserTS] - detected H264 stream");
+					m_streamtype =  1;
+				}
+				else
+					continue;
+			}
+
+			switch(m_streamtype)
+			{
+				case(0): // mpeg2
+				{
+					if ((sc == 0x00) || (sc == 0xb3) || (sc == 0xb8)) /* picture, sequence, group start code */
 					{
-						if (ptsvalid)
+						if ((sc == 0xb3) && m_enable_accesspoints) /* sequence header */
 						{
-							addAccessPoint(offset, pts);
-							//eDebug("Sequence header at %llx, pts %llx", offset, pts);
+							if (ptsvalid)
+							{
+								addAccessPoint(offset, pts);
+								//eDebug("[eMPEGStreamParserTS] Sequence header at %llx, pts %llx", offset, pts);
+							}
+						}
+						if (pkt <= (end - 6))
+						{
+							unsigned long long data = sc | ((unsigned)pkt[4] << 8) | ((unsigned)pkt[5] << 16);
+							if (ptsvalid) // If available, add timestamp data as well. PTS = 33 bits
+								data |= (pts << 31) | 0x1000000;
+							writeStructureEntry(offset + pkt_offset, data);
+						}
+						else
+						{
+							// Returning non-zero suggests we need more data. This does not
+							// work, and never has, so we should make this a void function
+							// or fix that...
+							return 1;
 						}
 					}
-					if (pkt <= (end - 6))
+
+					break;
+				}
+
+				case(1): // h.264 */
+				{
+					if (sc == 0x09)
 					{
-						unsigned long long data = sc | ((unsigned)pkt[4] << 8) | ((unsigned)pkt[5] << 16);
+						/* store image type */
+						unsigned long long data = sc | (pkt[4] << 8);
 						if (ptsvalid) // If available, add timestamp data as well. PTS = 33 bits
 							data |= (pts << 31) | 0x1000000;
 						writeStructureEntry(offset + pkt_offset, data);
-					}
-					else
-					{
-						// Returning non-zero suggests we need more data. This does not
-						// work, and never has, so we should make this a void function
-						// or fix that...
-						return 1;
-					}
-				}
-			}
-			else if (m_streamtype == 1) /* H.264 */
-			{
-				if (sc == 0x09)
-				{
-					/* store image type */
-					unsigned long long data = sc | (pkt[4] << 8);
-					if (ptsvalid) // If available, add timestamp data as well. PTS = 33 bits
-						data |= (pts << 31) | 0x1000000;
-					writeStructureEntry(offset + pkt_offset, data);
-					if ( //pkt[3] == 0x09 &&   /* MPEG4 AVC NAL unit access delimiter */
-						 (pkt[4] >> 5) == 0) /* and I-frame */
-					{
-						if (ptsvalid && m_enable_accesspoints)
+						if ( //pkt[3] == 0x09 &&   /* MPEG4 AVC NAL unit access delimiter */
+							(pkt[4] >> 5) == 0) /* and I-frame */
 						{
-							addAccessPoint(offset, pts);
-							// eDebug("MPEG4 AVC UAD at %llx, pts %llx", offset, pts);
+							if (ptsvalid && m_enable_accesspoints)
+							{
+								addAccessPoint(offset, pts);
+								// eDebug("[eMPEGStreamParserTS] MPEG4 AVC UAD at %llx, pts %llx", offset, pts);
+							}
 						}
 					}
+
+					break;
+				}
+
+				case(6): // h.265
+				{
+					int nal_unit_type = (sc >> 1);
+					if (nal_unit_type == 35) /* H265 NAL unit access delimiter */
+					{
+						unsigned long long data = sc | (pkt[5] << 8);
+						writeStructureEntry(offset + pkt_offset, data);
+
+						if ((pkt[5] >> 5) == 0) /* check pic_type for I-frame */
+						{
+							if (ptsvalid)
+							{
+								addAccessPoint(offset, pts);
+							}
+						}
+					}
+
+					break;
+				}
+
+				default:
+				{
+					eDebug("[eMPEGStreamParserTS]: unknown streamtype: %d ", m_streamtype);
+
+					break;
 				}
 			}
 		}
-		++pkt;
 	}
 	return 0;
 }
